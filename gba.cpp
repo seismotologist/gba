@@ -2,148 +2,55 @@
 #include <iostream>
 
 
-bool TData::open(std::string filename) {
-	_isP = NULL; //&std::cin;
-	_fbP = NULL;
-
-	_fbP = new std::filebuf(); // NEW_MEM
-	if ( !_fbP->open(filename.c_str(), std::ios::in) ) {
-		std::cerr << "couldn't open " << filename << std::endl;
-		return false;
-	}
-	_isP = new std::istream(_fbP); // NEW_MEM
-	return true;
-}
-
-void TData::close() {
-	delete _isP;
-	_fbP->close();
-	delete _fbP;
-}
-
-bool TData::load(std::string filename, std::string dtype) {
-	if ( !open(filename) ) {
-		std::cerr << "could not open file " << filename << std::endl;
-		return false;
-	} else {
+bool TData::load(std::string filename) {
 #ifdef DEBUG
-		std::cout << "Reading: " << filename << std::endl;
+		std::cout << "Reading training data set from: " << filename << std::endl;
 #endif
-		if ( !read(dtype) ) {
-			std::cerr << "errors while reading or interpreting file " << filename << std::endl;
-			return false;
-		}
-		close();
-	}
+	_nid = new NcFile(filename.c_str());
+	if(!_nid->is_valid())
+		return false;
+	_dim_nt = _nid->get_dim("traces");
+	_ntraces = _dim_nt->size();
+	_dim_t = _nid->get_dim("time");
+	_ntimes = _dim_t->size();
+	_dim_f = _nid->get_dim("filter");
+	_nbands = _dim_f->size();
+	_m_gsl = gsl_vector_alloc (_dim_nt->size());
+	_r_gsl = gsl_vector_alloc (_dim_nt->size());
+	_t_gsl = gsl_vector_alloc (_dim_t->size());
+	_var_mag = _nid->get_var("magnitude");
+	_var_dist = _nid->get_var("epicdist");
+	_var_time = _nid->get_var("time");
+	_var_mag->get(_m_gsl->data,_dim_nt->size());
+	_var_dist->get(_r_gsl->data,_dim_nt->size());
+	_var_time->get(_t_gsl->data,_dim_t->size());
+	_amps_var[vertical] = _nid->get_var("z");
+	_amps_var[horizontal] = _nid->get_var("h");
+
+#ifdef DEBUG
+	std::cout << "Number of traces: " << _dim_nt->size() << std::endl;
+	std::cout << "Number of filters: " << _dim_f->size() << std::endl;
+	std::cout << "Number of timesteps: " << _dim_t->size() << std::endl;
+#endif
+
+	_amps[vertical] = gsl_matrix_alloc(_dim_nt->size(),_dim_f->size());
+	_amps[horizontal] = gsl_matrix_alloc(_dim_nt->size(),_dim_f->size());
+
+	// Preload data for first time step
+	_amps_var[vertical]->get(_amps[vertical]->data,1,_dim_nt->size(),_dim_f->size());
+	_amps_var[horizontal]->get(_amps[horizontal]->data,1,_dim_nt->size(),_dim_f->size());
+	_currenttime_idx = 1;
 	return true; // if successful
 }
 
-bool TData::read_traces(){
-	row r (9);
-	int linecnt, charcnt, ret;
-	char buf[400];
-	size_t i,j;
-
-	for (linecnt = 0; !(*_isP).eof(); linecnt++ ) {
-		(*_isP).getline(buf, 400);
-		charcnt = (*_isP).gcount();
-		if ( 3 > charcnt ) {
-			continue; // empty line found, skip to next
-		}
-		if ( !(400 > charcnt) )
-			return false; // line too long
-
-		ret = sscanf(buf, "%lg,%lg,%lg,%lg,%lg,%lg,%lg,%lg,%lg",
-				&r[0], &r[1], &r[2], &r[3], &r[4], &r[5], &r[6], &r[7], &r[8]);
-		if (9 > ret)
-			std::cerr << "Reading failed for line: " << buf << std::endl;
-		_tdata.push_back(r);
+gsl_matrix * TData::get_amps(int timeidx, TData::Component cmpnt){
+	if (timeidx != _currenttime_idx){
+		_amps_var[cmpnt]->set_cur(timeidx,0,0);
+		_amps_var[cmpnt]->get(_amps[cmpnt]->data,1,_dim_nt->size(),_dim_f->size());
+		return _amps[cmpnt];
+	}else{
+		return _amps[cmpnt];
 	}
-#ifdef DEBUG
-	std::cout << "Number of traces in training data set: " << _tdata.size() << std::endl;
-#endif
-	_tdata_gsl = gsl_matrix_alloc(_tdata.size(),9);
-	for(i=0; i < _tdata.size(); i++){
-		for (j=0; j < 9; j++){
-			gsl_matrix_set(_tdata_gsl,i,j,std::log10(_tdata[i][j]));
-		}
-	}
-	_ntraces = _tdata.size();
-	_nbands = 9;
-	return true;
-}
-
-bool TData::read_magnitudes(){
-	int linecnt, charcnt, ret;
-	double magnitude;
-	char buf[10];
-
-	for (linecnt = 0; !(*_isP).eof(); linecnt++ ) {
-		(*_isP).getline(buf, 10);
-		charcnt = (*_isP).gcount();
-		if ( 1 > charcnt ) {
-			continue; // empty line found, skip to next
-		}
-		if ( !(10 > charcnt) )
-			return false; // line too long
-
-		ret = sscanf(buf, "%lg",&magnitude);
-		if (1 > ret){
-			std::cerr << "Reading failed for line: " << buf << std::endl;
-			return false;
-		}
-		_m.push_back(magnitude);
-	}
-#ifdef DEBUG
-	std::cout << "Number of magnitudes in training data set: " << _m.size() << std::endl;
-#endif
-	_m_gsl = gsl_vector_alloc (_m.size());
-	for (size_t i=0; i<_m.size();i++){
-		gsl_vector_set(_m_gsl,i,_m[i]);
-	}
-	return true;
-}
-
-bool TData::read_distances(){
-	int linecnt, charcnt, ret;
-	double distance;
-	char buf[10];
-
-	for (linecnt = 0; !(*_isP).eof(); linecnt++ ) {
-		(*_isP).getline(buf, 10);
-		charcnt = (*_isP).gcount();
-		if ( 1 > charcnt ) {
-			continue; // empty line found, skip to next
-		}
-		if ( !(10 > charcnt) )
-			return false; // line too long
-
-		ret = sscanf(buf, "%lg",&distance);
-		if (1 > ret){
-			std::cerr << "Reading failed for line: " << buf << std::endl;
-			return false;
-		}
-		_r.push_back(distance);
-	}
-#ifdef DEBUG
-	std::cout << "Number of distances in training data set: " << _r.size() << std::endl;
-#endif
-	_r_gsl = gsl_vector_alloc (_r.size());
-	for (size_t i=0; i<_r.size();i++){
-		gsl_vector_set(_r_gsl,i,_r[i]);
-	}
-	return true;
-}
-
-bool TData::read(std::string dtype){
-	bool success = false;
-	switch(dtype[0]){
-	case 't': success = read_traces(); break;
-	case 'm': success = read_magnitudes(); break;
-	case 'd': success = read_distances(); break;
-	default : std::cerr << "Datatype has to be either 'traces', 'magnitudes', or 'distances'" << std::endl;
-	}
-	return success;
 }
 
 int TData::get_noftraces(){
@@ -154,59 +61,178 @@ int TData::get_nofbands(){
 	return _nbands;
 }
 
-void GbA::init(){
-	datafiles df;
-	datafiles::iterator dfit;
-	_td = new TData;
-	df["./data/az_training.txt"] = "traces";
-	df["./data/m.txt"] = "magnitudes";
-	df["./data/r.txt"] = "distances";
-	for (dfit=df.begin(); dfit != df.end(); dfit++ )
-		_td->load(dfit->first,dfit->second);
+int TData::get_noftimes(){
+	return _ntimes;
 }
 
-void GbA::compute_likelihood(double *data, int nstats, int nbands, int nsim,
-						double mean[2], double cov[2][2]){
-	int i, j, k, l, idx;
+gsl_vector * TData::get_dist(){
+	return _r_gsl;
+}
+
+gsl_vector * TData::get_mag(){
+	return _m_gsl;
+}
+
+gsl_vector * TData::get_times(){
+	return _t_gsl;
+}
+
+void GbA::init(const std::string &filename){
+	_td = new TData;
+	_td->load(filename);
+}
+
+void GbA::set_samples(double *msamples, int nms, double *rsamples, int nrs){
+	delete[] _msamples;
+	delete[] _rsamples;
+	_msamples = new double[nms];
+	_rsamples = new double[nrs];
+	memcpy(_msamples,msamples,nms*sizeof(double));
+	memcpy(_rsamples,rsamples,nrs*sizeof(double));
+	_nms = nms;
+	_nrs = nrs;
+}
+
+void GbA::process(double *data, int nbands, float time, int cmpnt){
+
+	assert(nbands == _nbands);
+	pthread_mutex_lock(&_process_lock);
+	int i, j, k, timeidx=0;
+	double timemin=std::numeric_limits<double>::max();
 	gsl_vector *lsq = gsl_vector_alloc (_td->get_noftraces());
 	gsl_vector *input = gsl_vector_alloc (nbands);
 	gsl_vector *trace = gsl_vector_alloc (nbands);
-	double *mags, *dists;
+	gsl_matrix *tdata;
 	double misfit_l2;
-	size_t *indices = new size_t[nsim];
-	mags = new double[nsim];
-	dists = new double[nsim];
-
-	for (i=0; i<nstats; i++){
-		for (j=0; j<nbands; j++){
-			gsl_vector_set(input, j, std::log10(data[i*nbands+j]));
-		}
-		for (k=0; k<_td->get_noftraces(); k++){
-			gsl_matrix_get_row(trace, _td->_tdata_gsl, k);
-			gsl_vector_sub(trace,input);
-			misfit_l2 = gsl_blas_dnrm2(trace);
-			gsl_vector_set(lsq, k, misfit_l2*misfit_l2);
-		}
-		gsl_sort_vector_smallest_index(indices, nsim,lsq);
-		mean[0] = 0;
-		mean[1] = 0;
-		for(l=0; l<nsim; l++){
-			dists[l] = std::log10(gsl_vector_get(_td->_r_gsl, indices[l]));
-			mags[l] = gsl_vector_get(_td->_m_gsl, indices[l]);
-			//std::cout << gsl_vector_get(_td->_m_gsl,indices[l]) << std::endl;
-		}
-		mean[0] = gsl_stats_mean(dists,1,nsim);
-		mean[1] = gsl_stats_mean(mags,1,nsim);
-		cov[0][0] = gsl_stats_variance(dists, 1, nsim);
-		cov[1][1] = gsl_stats_variance(mags, 1, nsim);
-		cov[0][1] = gsl_stats_covariance_m(dists,1,mags,1,nsim,mean[0],mean[1]);
-		cov[1][0] = cov[0][1];
-		std::cout << "Distance: " << mean[0] << "; Magnitude: " << mean[1] << std::endl;
-		std::cout << "Covariance matrix:" << std::endl;
-		for(i=0; i<2; i++){
-			for(j=0;j<2;j++){
-				printf("%d, %d, %g\n",i,j,cov[i][j]);
-			}
+	size_t *indices = new size_t[_nsim];
+	TData::Component _c = static_cast<TData::Component>(cmpnt);
+	_status[_c] = true;
+	// Find time index
+	for(i=0;i<_td->get_noftimes();i++){
+		if(abs(gsl_vector_get(_td->get_times(),i) - time) < timemin){
+			timeidx = i;
+			timemin = abs(gsl_vector_get(_td->get_times(),i) - time);
 		}
 	}
+
+	tdata = _td->get_amps(timeidx,_c);
+
+
+	for (i=0; i<nbands; i++){
+			gsl_vector_set(input, i, std::log10(data[i]));
+	}
+	for (j=0; j<_td->get_noftraces(); j++){
+		gsl_matrix_get_row(trace, tdata, j);
+		gsl_vector_sub(trace,input);
+		misfit_l2 = gsl_blas_dnrm2(trace);
+		gsl_vector_set(lsq, j, misfit_l2*misfit_l2);
+	}
+
+	gsl_sort_vector_smallest_index(indices, _nsim,lsq);
+
+	for(k=0; k<_nsim; k++){
+		gsl_vector_set(&_r[_c].vector,k, std::log10(gsl_vector_get(_td->get_dist(), indices[k])));
+		gsl_vector_set(&_m[_c].vector,k, gsl_vector_get(_td->get_mag(), indices[k]));
+	}
+
+	if (_status[TData::vertical] && _status[TData::horizontal]){
+		_mv = gsl_vector_subvector(_mags,0,_mags->size);
+		_rv = gsl_vector_subvector(_dists,0,_dists->size);
+	} else if(_status[TData::vertical]){
+		_mv = gsl_vector_subvector(_mags,0,_nsim);
+		_rv = gsl_vector_subvector(_dists,0,_nsim);
+	} else if(_status[TData::horizontal]){
+		_mv = gsl_vector_subvector(_mags,_nsim,_nsim);
+		_rv = gsl_vector_subvector(_dists,_nsim,_nsim);
+	}
+
+	_mn[0] = gsl_stats_mean(_rv.vector.data,1,_rv.vector.size);
+	_mn[1] = gsl_stats_mean(_mv.vector.data,1,_mv.vector.size);
+	_cov[0][0] = gsl_stats_variance(_rv.vector.data, 1, _rv.vector.size);
+	_cov[1][1] = gsl_stats_variance(_mv.vector.data, 1, _mv.vector.size);
+	_cov[0][1] = gsl_stats_covariance_m(_rv.vector.data,1,_mv.vector.data,1,
+			                            _rv.vector.size,_mn[0],_mn[1]);
+	_cov[1][0] = _cov[0][1];
+	pthread_mutex_unlock(&_process_lock);
+}
+
+void GbA::get_m_r(double *m, int nm, double *r, int nr){
+	assert(nm == 2*_nsim);
+	for(size_t i=0; i<_mv.vector.size; i++){
+		m[i] = gsl_vector_get(&_mv.vector,i);
+		r[i] = gsl_vector_get(&_rv.vector,i);
+	}
+}
+
+void GbA::get_mean_cov(double mean[2], double cov[2][2]){
+	mean[0] = _mn[0];
+	mean[1] = _mn[1];
+	for(int i=0;i<2;i++){
+		for(int j=0;j<2;j++){
+			cov[i][j] = _cov[i][j];
+		}
+	}
+}
+
+void GbA::get_pdf(double *pdf, int nm, int nr, double *mmarg, int nms,
+		          double *rmarg, int nrs){
+	assert(nms==nm && nrs==nr);
+	assert(nr > 1 && nm > 1);
+	assert(nms == _nms && nrs == _nrs);
+
+	pthread_mutex_lock(&_process_lock);
+	double dm, dr, evd;
+	int i,j;
+	double *_m_tmp, *_r_tmp, *_r1, *_m1;
+	_m_tmp = new double[nm];
+	_r_tmp = new double[nr];
+	_r1 = new double[nr];
+	_m1 = new double[nm];
+	memcpy(_r1,_rsamples,nr*sizeof(double));
+	memcpy(_m1,_msamples,nm*sizeof(double));
+
+	// assume regular samples
+	dr = _rsamples[1] - _rsamples[0];
+	dm = _msamples[1] - _msamples[0];
+
+	// Compute pdf
+	for(i=0; i<nm; i++){
+		for(j=0; j<nr; j++){
+			pdf[i*nr+j] = gsl_ran_bivariate_gaussian_pdf(_msamples[i]-_mn[1], _rsamples[j]-_mn[0],
+							std::sqrt(_cov[1][1]), std::sqrt(_cov[0][0]),
+							_cov[0][1]/(std::sqrt(_cov[0][0])*std::sqrt(_cov[1][1])));
+		}
+	}
+
+	for(i=0;i<nm;i++){
+		_m_tmp[i] = 0;
+		for(j=0; j<nr-1; j++){
+			_m_tmp[i] = _m_tmp[i] + (pdf[i*nr+j] + pdf[i*nr+j+1])/2.*dr;
+		}
+	}
+	evd = 0;
+	for(i=0;i<nm-1;i++)
+		evd = evd + (_m_tmp[i] + _m_tmp[i+1])/2.*dm;
+	for(i=0;i<nm;i++)
+		_m_tmp[i] = _m_tmp[i] / evd;
+
+	for(j=0;j<nr;j++){
+		_r_tmp[j] = 0;
+		for(i=0; i<nm-1; i++){
+			_r_tmp[j] = _r_tmp[j] + (pdf[i*nr+j] + pdf[(i+1)*nr+j])/2.*dm;
+		}
+	}
+	evd=0;
+	for(i=0;i<nr-1;i++)
+		evd = evd + (_r_tmp[i] + _r_tmp[i+1])/2.*dr;
+	for(i=0;i<nr;i++)
+		_r_tmp[i] = _r_tmp[i] / evd;
+
+	memcpy(mmarg,_m_tmp,nm*sizeof(double));
+	memcpy(rmarg,_r_tmp,nr*sizeof(double));
+	delete[] _r1;
+	delete[] _m1;
+	delete[] _m_tmp;
+	delete[] _r_tmp;
+	pthread_mutex_unlock(&_process_lock);
 }
